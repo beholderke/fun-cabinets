@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MovieFX – film met omgevingseffecten</title>
+<style>
+:root{--bg:#f4efe6;--fg:#1d1a16;--mut:#6b645a;--line:#d8cfbf;--acc:#b4410d;--field:#fffaf0;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14110e;--fg:#f1e9da;--mut:#a39a8a;--line:#3a332a;--acc:#ff9a4d;--field:#1f1a15}}
+:root[data-theme="dark"]{--bg:#14110e;--fg:#f1e9da;--mut:#a39a8a;--line:#3a332a;--acc:#ff9a4d;--field:#1f1a15}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font:17px/1.55 Georgia,"Times New Roman",serif;min-height:100vh;display:flex;justify-content:center;padding:32px 18px}
+main{width:100%;max-width:560px}
+h1{font-size:2.1rem;line-height:1.15;margin:0 0 .4rem;letter-spacing:-.01em}
+p{margin:.3rem 0 1.2rem;color:var(--mut)}
+label{display:block;font:600 .9rem system-ui,sans-serif;margin:1.1rem 0 .35rem}
+input[type=text]{width:100%;padding:.7rem .8rem;border:1px solid var(--line);border-radius:6px;background:var(--field);color:var(--fg);font:1rem system-ui,sans-serif}
+input[type=file]{width:100%;font:1rem system-ui,sans-serif;color:var(--fg)}
+button{font:600 1rem system-ui,sans-serif;padding:.7rem 1.1rem;border-radius:6px;border:1px solid var(--line);background:var(--field);color:var(--fg);cursor:pointer;margin-top:.5rem}
+button:focus-visible,input:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+#enter{background:var(--acc);color:#fff;border-color:var(--acc);width:100%;font-size:1.15rem;padding:1rem;margin-top:1.6rem}
+#enter:disabled{opacity:.35;cursor:not-allowed}
+.st{font:.9rem system-ui,sans-serif;color:var(--mut);margin:.6rem 0 0}
+ul{font:.92rem/1.6 system-ui,sans-serif;color:var(--mut);padding-left:1.1rem;margin:1.8rem 0 0}
+</style>
+</head>
+<body>
+<main>
+<h1>De film speelt, de kamer speelt mee.</h1>
+<p>Kies een film. In je kamer komen eerst 2 minuten vlammen, dan 2 minuten storm en dan 2 minuten rook en stoom.</p>
+
+<label for="file">Film op je Quest</label>
+<input id="file" type="file" accept="video/*">
+
+<label for="url">Of een adres op je netwerk (http)</label>
+<input id="url" type="text" placeholder="http://192.168.1.20:8096/film.mp4">
+<button id="load">Laad adres</button>
+
+<p class="st" id="st">Nog geen film gekozen.</p>
+<p class="st" id="xr">AR wordt gecontroleerd…</p>
+<button id="enter" disabled>Start in je kamer</button>
+
+<ul>
+<li>A of X: pauze. Duimstick links of rechts: 10 seconden spoelen. B of Y: scherm opnieuw voor je zetten.</li>
+<li>Voor een snelle test: voeg <b>?len=20</b> toe aan het adres, dan duurt elk effect 20 seconden.</li>
+<li>Gebruik H.264 mp4. MKV en DTS-geluid werken vaak niet in de browser.</li>
+</ul>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+const q=new URLSearchParams(location.search),L=+q.get('len')||120,FADE=4;
+const $=id=>document.getElementById(id),R=Math.random,lerp=(a,b,t)=>a+(b-a)*t,rr=(a,b)=>a+(b-a)*R();
+const video=document.createElement('video');video.playsInline=true;video.crossOrigin='anonymous';video.preload='auto';
+
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+renderer.xr.enabled=true;renderer.xr.setReferenceSpaceType('local-floor');
+renderer.outputEncoding=THREE.sRGBEncoding;renderer.setClearColor(0x000000,0);
+const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(70,1,.05,50);
+const head=new THREE.Vector3(),fwd=new THREE.Vector3(0,0,-1),clock=new THREE.Clock();
+let W=3.2,H=1.8,asp=16/9,placed=false,frames=0,dtG=.016,ctr=new THREE.Vector3(),fw0=new THREE.Vector3(0,0,-1);
+
+// scherm + statusbalk
+const vt=new THREE.VideoTexture(video);vt.encoding=THREE.sRGBEncoding;
+const screen=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.MeshBasicMaterial({map:vt,toneMapped:false}));
+screen.visible=false;scene.add(screen);
+const hc=document.createElement('canvas');hc.width=1024;hc.height=128;
+const hx=hc.getContext('2d'),ht=new THREE.CanvasTexture(hc);
+const hud=new THREE.Mesh(new THREE.PlaneGeometry(2,.25),new THREE.MeshBasicMaterial({map:ht,transparent:true,depthWrite:false}));
+hud.visible=false;scene.add(hud);let hudT=0;
+function say(s,sec=3){hx.clearRect(0,0,1024,128);hx.fillStyle='#fff';hx.font='bold 52px sans-serif';hx.textAlign='center';hx.fillText(s,512,80);ht.needsUpdate=true;hud.visible=true;hudT=sec}
+const fmt=t=>new Date(t*1000).toISOString().substr(11,8);
+
+// verduisteringskoepel (kleurt de echte kamer)
+const dome=new THREE.Mesh(new THREE.SphereGeometry(9,24,16),new THREE.MeshBasicMaterial({color:0,transparent:true,opacity:0,side:THREE.BackSide,depthWrite:false}));
+dome.renderOrder=-1;scene.add(dome);
+let dO=0,dR=0,dG=0,dB=0,flash=0;
+const D=(o,r,g,b)=>{dO+=o;dR+=o*r;dG+=o*g;dB+=o*b};
+
+// deeltjes: billboards via instancing
+const VS=`attribute vec3 off;attribute vec4 col;attribute float sz;varying vec4 vc;varying vec2 vu;void main(){vc=col;vu=uv;vec4 mv=modelViewMatrix*vec4(off,1.);mv.xy+=position.xy*sz;gl_Position=projectionMatrix*mv;}`;
+const FS=`uniform float gain;varying vec4 vc;varying vec2 vu;void main(){float a=smoothstep(1.,0.,length(vu-.5)*2.);gl_FragColor=vec4(vc.rgb,vc.a*a*gain);}`;
+class PS{
+ constructor(n,add,order,drag=0){
+  this.n=n;this.cur=0;this.drag=drag;this.P=Array.from({length:n},()=>({l:0}));
+  const g=new THREE.InstancedBufferGeometry(),b=new THREE.PlaneGeometry(1,1);
+  g.index=b.index;g.setAttribute('position',b.attributes.position);g.setAttribute('uv',b.attributes.uv);
+  this.o=new THREE.InstancedBufferAttribute(new Float32Array(n*3),3).setUsage(THREE.DynamicDrawUsage);
+  this.c=new THREE.InstancedBufferAttribute(new Float32Array(n*4),4).setUsage(THREE.DynamicDrawUsage);
+  this.s=new THREE.InstancedBufferAttribute(new Float32Array(n),1).setUsage(THREE.DynamicDrawUsage);
+  g.setAttribute('off',this.o);g.setAttribute('col',this.c);g.setAttribute('sz',this.s);g.instanceCount=n;
+  this.u={gain:{value:0}};
+  this.m=new THREE.Mesh(g,new THREE.ShaderMaterial({vertexShader:VS,fragmentShader:FS,uniforms:this.u,transparent:true,depthWrite:false,blending:add?THREE.AdditiveBlending:THREE.NormalBlending}));
+  this.m.frustumCulled=false;this.m.renderOrder=order;scene.add(this.m);
+ }
+ emit(x,y,z,vx,vy,vz,life,s0,s1,c0,c1,a,sym,age=0){
+  for(let k=0;k<this.n;k++){const i=(this.cur+k)%this.n,p=this.P[i];
+   if(p.l<=0){Object.assign(p,{x,y,z,vx,vy,vz,m:life,l:life*(1-age),s0,s1,c0,c1,a,sym});this.cur=i+1;return}}
+ }
+ update(dt){
+  const oa=this.o.array,ca=this.c.array,sa=this.s.array,d=Math.max(0,1-this.drag*dt);
+  for(let i=0;i<this.n;i++){const p=this.P[i];if(p.l<=0)continue;
+   p.l-=dt;if(p.l<=0){sa[i]=0;continue}
+   p.vx*=d;p.vy*=d;p.vz*=d;p.x+=p.vx*dt;p.y+=p.vy*dt;p.z+=p.vz*dt;
+   const t=1-p.l/p.m,al=p.a*(p.sym?Math.min(t/.2,1)*Math.min((1-t)/.2,1):Math.min(t/.1,1)*(1-t));
+   oa[i*3]=p.x;oa[i*3+1]=p.y;oa[i*3+2]=p.z;sa[i]=lerp(p.s0,p.s1,t);
+   ca[i*4]=lerp(p.c0[0],p.c1[0],t);ca[i*4+1]=lerp(p.c0[1],p.c1[1],t);ca[i*4+2]=lerp(p.c0[2],p.c1[2],t);ca[i*4+3]=al}
+  this.o.needsUpdate=this.c.needsUpdate=this.s.needsUpdate=true;
+ }
+ clear(){for(const p of this.P)p.l=0;this.s.array.fill(0);this.s.needsUpdate=true;this.u.gain.value=0}
+}
+const fire=new PS(1200,true,2),cloud=new PS(80,false,1),rain=new PS(500,false,2),bolt=new PS(400,true,3),smoke=new PS(260,false,1),steam=new PS(500,false,2,1.2);
+const allPS=[fire,cloud,rain,bolt,smoke,steam];
+const acc={};const tick=(k,rate,fn)=>{acc[k]=(acc[k]||0)+rate*dtG;while(acc[k]>=1){acc[k]--;fn()}};
+const disk=(r0,r1)=>{const a=R()*6.283,r=rr(r0,r1);return[Math.cos(a)*r,Math.sin(a)*r]};
+
+// effect 1: vlammen
+function fireFx(i,p){
+ fire.u.gain.value=i;
+ const sc=screen.position,gr=.05+1.75*(1-(1-p)**2),hw=W/2+gr,hh=H/2+gr;
+ const y0=Math.max(0,sc.y-hh),y1=Math.min(2.6,sc.y+hh),side=y1-y0,tot=4*hw+2*side,rx=-fwd.z,rz=fwd.x;
+ tick('f',tot*(18+22*p)*i,()=>{
+  let r=R()*tot,xo,y;
+  if(r<2*hw){xo=r-hw;y=y0}else if((r-=2*hw)<2*hw){xo=r-hw;y=y1}else if((r-=2*hw)<side){xo=-hw;y=y0+r}else{xo=hw;y=y0+r-side}
+  fire.emit(sc.x+rx*xo,y,sc.z+rz*xo,rr(-.15,.15),rr(.9,1.6),rr(-.15,.15),rr(.7,1.3),.35*lerp(.7,1.5,p)*rr(.7,1.2),.08,[1,.9,.4],[.8,.1,.02],1,0)});
+ const am=Math.min(1,Math.max(0,(p-.25)/.45)),rad=lerp(1.6,2.4,p);
+ tick('fr',2*Math.PI*rad*7*am*i,()=>{const a=R()*6.283;
+  fire.emit(ctr.x+Math.cos(a)*rad,.02,ctr.z+Math.sin(a)*rad,rr(-.15,.15),rr(.9,1.6),rr(-.15,.15),rr(.7,1.3),.3*rr(.8,1.4),.08,[1,.9,.4],[.8,.1,.02],1,0)});
+ D(Math.max(0,.12+.04*Math.sin(performance.now()/90))*i,.2,.04,0);
+}
+
+// effect 2: storm
+let nextBolt=3,bn=0,bt=0,bp=[];
+function strike(){
+ const a=rr(-1.13,1.13),c=Math.cos(a),s=Math.sin(a),d=rr(2.6,3.6);
+ const x=ctr.x+(fw0.x*c+fw0.z*s)*d,z=ctr.z+(-fw0.x*s+fw0.z*c)*d,N=18,wk=[];let wx=0,wz=0;
+ for(let k=0;k<=N;k++){wk.push([wx,wz]);wx+=rr(-.18,.18);wz+=rr(-.18,.18)}
+ bp=wk.map((w,k)=>{const t=k/N;return[x+w[0]-wk[N][0]*t,lerp(2.7,0,t),z+w[1]-wk[N][1]*t]});
+ bn=2+(R()*2|0);bt=0;
+}
+function stormFx(i,p,ec){
+ cloud.u.gain.value=rain.u.gain.value=bolt.u.gain.value=i;D(.62*i,0,0,0);
+ tick('c',3.5,()=>{const[x,z]=disk(0,3.8),s=rr(3,4.5);cloud.emit(ctr.x+x,2.7,ctr.z+z,rr(-.5,.5),0,rr(-.5,.5),rr(14,20),s,s,[.12,.13,.17],[.12,.13,.17],.85,1)});
+ tick('r',220*i,()=>{const[x,z]=disk(0,2.8);rain.emit(ctr.x+x,2.8,ctr.z+z,0,-7.5,0,.38,.035,.035,[.75,.82,.95],[.75,.82,.95],.6,0)});
+ nextBolt-=dtG;
+ if(i>.5&&ec>2&&nextBolt<=0&&bn===0){nextBolt=rr(3,8);strike()}
+ if(bn>0){bt+=dtG;const ph=bt/.14;
+  if(Math.floor(ph)>=bn)bn=0;
+  else if(ph%1<.45){flash=Math.max(flash,.6);for(const q of bp)bolt.emit(q[0],q[1],q[2],0,0,0,.05,.14,.1,[.85,.9,1],[.85,.9,1],1,0)}}
+}
+
+// effect 3: rook en stoom
+const SA=[-50,50,-130,130];
+function smokeFx(i,p,ec){
+ smoke.u.gain.value=steam.u.gain.value=i;D(.3*i,.38,.38,.4);
+ tick('s',(8+8*p)*i,()=>{const[x,z]=disk(1.8,2.4),s=rr(.9,1.5);smoke.emit(ctr.x+x,.05,ctr.z+z,rr(-.1,.1),rr(.25,.55),rr(-.1,.1),rr(5,8),s*.6,s*1.8,[.4,.4,.42],[.4,.4,.42],.55,1)});
+ SA.forEach((deg,k)=>{
+  const s=Math.max(0,Math.sin((ec/6+k*.25)*6.283));
+  tick('j'+k,45*s*s*i,()=>{const a=deg*Math.PI/180,dx=fw0.x*Math.cos(a)+fw0.z*Math.sin(a),dz=-fw0.x*Math.sin(a)+fw0.z*Math.cos(a);
+   steam.emit(ctr.x+dx*2+rr(-.05,.05),.05,ctr.z+dz*2+rr(-.05,.05),rr(-.25,.25),rr(1.4,2.2),rr(-.25,.25),rr(1.8,2.8),.4,1.5,[.93,.95,.98],[.93,.95,.98],.45,1)})});
+}
+
+// tijdlijn (het "script"): start, einde in seconden filmtijd
+const cues=[
+ {s:0,e:L,fn:fireFx,sys:[fire],on:false},
+ {s:L,e:2*L,fn:stormFx,sys:[cloud,rain,bolt],on:false,warm(){for(let k=0;k<35;k++){const[x,z]=disk(0,3.8),s=rr(3,4.5);cloud.emit(ctr.x+x,2.7,ctr.z+z,rr(-.5,.5),0,rr(-.5,.5),rr(14,20),s,s,[.12,.13,.17],[.12,.13,.17],.85,1,rr(0,.8))}}},
+ {s:2*L,e:3*L,fn:smokeFx,sys:[smoke,steam],on:false,warm(){for(let k=0;k<40;k++){const[x,z]=disk(1.8,2.4),s=rr(.9,1.5),age=rr(0,.8),life=rr(5,8),vy=rr(.25,.55);smoke.emit(ctr.x+x,.05+vy*life*age,ctr.z+z,0,vy,0,life,s*.6,s*1.8,[.4,.4,.42],[.4,.4,.42],.55,1,age)}}}
+];
+const sm=x=>{x=Math.min(1,Math.max(0,x));return x*x*(3-2*x)};
+function endCue(c){c.on=false;c.sys.forEach(s=>s.clear());bn=0}
+
+// plaatsing en bediening
+function place(){
+ const c=renderer.xr.getCamera(camera),d=new THREE.Vector3();
+ head.setFromMatrixPosition(c.matrixWorld);c.getWorldDirection(d);d.y=0;
+ if(d.lengthSq()<.01)d.set(0,0,-1);d.normalize();fwd.copy(d);
+ W=3.2;H=W/asp;
+ screen.position.set(head.x+d.x*3,Math.max(head.y,1.2),head.z+d.z*3);
+ screen.scale.set(W,H,1);screen.lookAt(head.x,screen.position.y,head.z);screen.visible=true;
+ hud.position.set(screen.position.x,screen.position.y-H/2-.2,screen.position.z);hud.lookAt(head.x,hud.position.y,head.z);
+}
+function toggle(){if(video.paused){video.play()}else{video.pause();say('Pauze  '+fmt(video.currentTime),3)}}
+function seek(d){video.currentTime=Math.max(0,Math.min(video.duration-1,video.currentTime+d));say(fmt(video.currentTime),2)}
+const prev={};
+function input(){
+ const s=renderer.xr.getSession();if(!s)return;
+ for(const src of s.inputSources){const gp=src.gamepad;if(!gp)continue;
+  const pv=prev[src.handedness]||(prev[src.handedness]={}),b=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
+  const edge=(k,v)=>{const r=v&&!pv[k];pv[k]=v;return r};
+  if(edge('a',b(4))||edge('t',b(0)))toggle();
+  if(edge('b',b(5))){place();say('Scherm herplaatst',2)}
+  const x=gp.axes[2]||0;
+  if(!pv.st&&Math.abs(x)>.7){pv.st=true;seek(x>0?10:-10)}else if(Math.abs(x)<.3)pv.st=false}
+}
+
+function loop(){
+ dtG=Math.min(clock.getDelta(),.1);
+ const pres=renderer.xr.isPresenting;
+ if(!pres)return;
+ head.setFromMatrixPosition(renderer.xr.getCamera(camera).matrixWorld);
+ if(!placed&&++frames>10){place();placed=true;video.play();say('A = pauze   stick = 10 s   B = herplaatsen',6)}
+ if(placed){
+  input();
+  const t=video.currentTime;dO=dR=dG=dB=0;flash=Math.max(0,flash-dtG*5);
+  for(const c of cues){
+   if(t>=c.s&&t<c.e){
+    if(!c.on){c.on=true;ctr.copy(head);fw0.copy(fwd);bn=0;nextBolt=3;if(c.warm)c.warm()}
+    c.fn(Math.min(sm((t-c.s)/FADE),sm((c.e-t)/FADE)),(t-c.s)/(c.e-c.s),t-c.s);
+   }else if(c.on)endCue(c);
+  }
+  const o=Math.max(dO,flash*.5),k=dO>0?1/dO:0,f=Math.min(1,flash);
+  dome.position.copy(head);dome.material.opacity=Math.min(.9,o);
+  dome.material.color.setRGB(lerp(dR*k,1,f),lerp(dG*k,1,f),lerp(dB*k,1,f));
+  allPS.forEach(s=>s.update(dtG));
+  hudT-=dtG;if(hudT<=0)hud.visible=false;
+ }
+ renderer.render(scene,camera);
+}
+renderer.setAnimationLoop(loop);
+
+// startscherm
+let vReady=false,xrOK=false;
+const refresh=()=>{$('enter').disabled=!(vReady&&xrOK)};
+function load(src){vReady=false;refresh();video.src=src;$('st').textContent='Film laden…'}
+video.onloadedmetadata=()=>{asp=video.videoWidth/video.videoHeight;vReady=true;$('st').textContent='Film klaar ('+fmt(video.duration)+').';refresh()};
+video.onerror=()=>{vReady=false;refresh();$('st').textContent='Deze video kan niet worden afgespeeld. Probeer een H.264 mp4 of controleer het adres.'};
+$('file').onchange=e=>{const f=e.target.files[0];if(f)load(URL.createObjectURL(f))};
+$('load').onclick=()=>{const u=$('url').value.trim();if(u)load(u)};
+(async()=>{try{xrOK=!!(navigator.xr&&await navigator.xr.isSessionSupported('immersive-ar'))}catch(e){}
+ $('xr').textContent=xrOK?'AR met doorkijk is beschikbaar.':'AR niet beschikbaar. Open deze pagina in de Meta Quest Browser.';refresh()})();
+$('enter').onclick=async()=>{
+ try{
+  const s=await navigator.xr.requestSession('immersive-ar',{optionalFeatures:['local-floor']});
+  placed=false;frames=0;
+  s.addEventListener('end',()=>{video.pause();cues.forEach(c=>c.on&&endCue(c));screen.visible=false;hud.visible=false;dome.material.opacity=0;placed=false});
+  await renderer.xr.setSession(s);
+ }catch(e){$('st').textContent='Kan AR niet starten: '+e.message}
+};
+</script>
+</body>
+</html>
