@@ -36,7 +36,7 @@ input[type=range]{flex:1;min-width:140px}
   {"t":"00:20:00","scene":"strand.glb"}
 ]</textarea>
 <div class="r"><select id="sel"></select><button id="add">Cue op huidige filmtijd</button><button id="ap">Cues toepassen</button></div></section>
-<section><h2>Scherm</h2>
+<section><h2>Scherm</h2><p style="color:var(--mu);font-size:14px;margin:0 0 6px">Bevat je GLB een vlak met de naam my-screen, dan speelt de film daarop en gelden deze regelaars niet.</p>
 <div class="r"><label style="margin:0">Breedte</label><input id="sz" type="range" min="1" max="12" step="0.1" value="4">
 <label style="margin:0">Afstand</label><input id="di" type="range" min="1" max="10" step="0.1" value="3.5">
 <label style="margin:0">Hoogte</label><input id="hh" type="range" min="0.5" max="4" step="0.1" value="1.7"></div></section>
@@ -44,10 +44,12 @@ input[type=range]{flex:1;min-width:140px}
 <div class="r"><button class="go" id="vr">Start in VR</button><button id="pp">Afspelen of pauzeren</button><input id="sk" type="range" min="0" max="1" step="0.001" value="0"><span id="tm">0:00</span></div>
 <div id="st">Open deze pagina rechtstreeks in de Quest Browser. In VR start of pauzeert de trekker op een controller de film.</div></section>
 <div id="view"></div>
-<script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.149.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/GLTFLoader.js"></script>
 <script>
 const $=id=>document.getElementById(id),FADE=1.2;
+addEventListener('error',e=>{$('st').textContent='Fout: '+e.message});
+if(!window.THREE||!THREE.GLTFLoader){$('st').textContent='three.js of de GLB-lader kon niet geladen worden. Controleer je verbinding en ververs de pagina.';throw new Error('three ontbreekt')}
 const R=new THREE.WebGLRenderer({antialias:true});R.outputEncoding=THREE.sRGBEncoding;R.xr.enabled=true;R.setPixelRatio(Math.min(devicePixelRatio,2));
 $('view').appendChild(R.domElement);
 const S=new THREE.Scene();S.background=new THREE.Color(0x05070a);
@@ -55,6 +57,7 @@ const cam=new THREE.PerspectiveCamera(70,16/9,.05,300);cam.position.set(0,1.6,0)
 S.add(new THREE.HemisphereLight(0xffffff,0x445566,1.2));const sun=new THREE.DirectionalLight(0xffffff,1.3);sun.position.set(3,6,2);S.add(sun);
 const vid=document.createElement('video');vid.playsInline=true;vid.crossOrigin='anonymous';
 const tex=new THREE.VideoTexture(vid);tex.encoding=THREE.sRGBEncoding;
+const tex2=new THREE.VideoTexture(vid);tex2.encoding=THREE.sRGBEncoding;tex2.flipY=false;
 const scr=new THREE.Mesh(new THREE.PlaneGeometry(16,9),new THREE.MeshBasicMaterial({map:tex}));scr.renderOrder=5;S.add(scr);
 function layout(){const w=+$('sz').value;scr.scale.set(w/16,w/16,1);scr.position.set(0,+$('hh').value,-$('di').value)}
 ['sz','di','hh'].forEach(i=>$(i).oninput=layout);layout();
@@ -62,14 +65,27 @@ const bufs={},ents={},loader=new THREE.GLTFLoader();let cues=[],cur;
 $('gf').onchange=async e=>{for(const f of e.target.files)bufs[f.name]=await f.arrayBuffer();const n=Object.keys(bufs);
  $('lst').textContent=n.join(', ')||'Nog geen GLB’s gekozen.';$('sel').innerHTML=n.map(x=>`<option>${x}</option>`).join('')};
 $('vf').onchange=e=>{const f=e.target.files[0];if(f){vid.src=URL.createObjectURL(f);vid.load()}};
+const SCR=/^(my[-_ ]?screen|screen|scherm)/i;
+function bindScreen(m){const g=m.geometry,p=g.attributes.position,W=m.matrixWorld;
+ const N=new THREE.Vector3().fromBufferAttribute(g.attributes.normal,0).applyMatrix3(new THREE.Matrix3().getNormalMatrix(W)).normalize();
+ const up=new THREE.Vector3(0,1,0).addScaledVector(N,-N.y);if(up.length()<.2)up.set(0,0,-1).addScaledVector(N,N.z);up.normalize();
+ const rt=new THREE.Vector3().crossVectors(up,N),v=new THREE.Vector3(),A=[],B=[];
+ for(let i=0;i<p.count;i++){v.fromBufferAttribute(p,i).applyMatrix4(W);A.push(v.dot(rt));B.push(v.dot(up))}
+ const a0=Math.min(...A),a1=Math.max(...A),b0=Math.min(...B),b1=Math.max(...B),uv=[];
+ for(let i=0;i<p.count;i++)uv.push((A[i]-a0)/(a1-a0),1-(B[i]-b0)/(b1-b0));
+ g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+ return new THREE.MeshBasicMaterial({map:tex2,side:THREE.DoubleSide,transparent:true,opacity:0})}
 async function ensure(n){if(ents[n])return ents[n];
  const g=await new Promise((ok,no)=>loader.parse(bufs[n].slice(0),'',ok,no));const mats=[];
- g.scene.traverse(o=>{if(o.material){const a=[].concat(o.material).map(m=>{m=m.clone();m.transparent=true;m.opacity=0;mats.push(m);return m});o.material=Array.isArray(o.material)?a:a[0]}});
+ let screen=null;const st=g.scene.getObjectByName('start')||g.scene.getObjectByName('begin');
+ if(st){g.scene.updateMatrixWorld(true);const sp=new THREE.Vector3(),sq=new THREE.Quaternion(),f=new THREE.Vector3(0,0,-1),Y=new THREE.Vector3(0,1,0);st.getWorldPosition(sp);st.getWorldQuaternion(sq);f.applyQuaternion(sq);const th=Math.atan2(f.x,-f.z);g.scene.rotation.y=th;g.scene.position.copy(sp.applyAxisAngle(Y,th).negate());g.scene.position.y=0}
+ g.scene.updateMatrixWorld(true);
+ g.scene.traverse(o=>{if(o.isMesh&&!screen&&SCR.test(o.name)){screen=o;o.material=bindScreen(o);mats.push(o.material)}else if(o.material){const a=[].concat(o.material).map(m=>{m=m.clone();m.transparent=true;m.opacity=0;mats.push(m);return m});o.material=Array.isArray(o.material)?a:a[0]}});
  const mixer=new THREE.AnimationMixer(g.scene);g.animations.forEach(c=>mixer.clipAction(c).play());
- return ents[n]={root:g.scene,mixer,mats,a:0,t:0}}
-async function setScene(n){if(n===cur)return;cur=n;for(const k in ents)ents[k].t=0;if(!n)return;
+ return ents[n]={root:g.scene,mixer,mats,screen,a:0,t:0}}
+async function setScene(n){if(n===cur)return;cur=n;for(const k in ents)ents[k].t=0;if(!n){scr.visible=true;return}
  if(!bufs[n]){$('st').textContent='GLB ontbreekt: '+n;return}
- try{const e=await ensure(n);if(cur!==n)return;S.add(e.root);e.t=1}catch(x){$('st').textContent='Kon '+n+' niet laden'}}
+ try{const e=await ensure(n);if(cur!==n)return;S.add(e.root);e.t=1;scr.visible=!e.screen;if(e.screen)$('st').textContent='De film speelt op het vlak “'+e.screen.name+'” in '+n+'.'}catch(x){$('st').textContent='Kon '+n+' niet laden'}}
 const sec=t=>String(t).split(':').reduce((a,x)=>a*60+ +x,0),fmt=s=>{s=Math.floor(s);return Math.floor(s/3600)+':'+String(Math.floor(s%3600/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
 function parse(){try{cues=JSON.parse($('cues').value).map(c=>({s:sec(c.t),n:c.scene||null})).sort((a,b)=>a.s-b.s);$('st').textContent=cues.length+' cues actief.'}catch(e){$('st').textContent='De cue-lijst is geen geldige JSON.'}}
 $('ap').onclick=parse;parse();
